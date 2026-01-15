@@ -1,0 +1,152 @@
+================================================================================
+STEP 1: EXCEL FILE ANALYSIS - DETAILED REPORT
+================================================================================
+
+SHEET STRUCTURE:
+--------------------------------------------------------------------------------
+  Sheet '20 ': 22 rows x 33 columns
+  Sheet '30': 32 rows x 43 columns
+  Sheet '50': 52 rows x 63 columns
+  Sheet '80': 82 rows x 93 columns
+  Sheet '138': 140 rows x 150 columns
+
+================================================================================
+COLUMN DESCRIPTIONS (for 138 sheet):
+================================================================================
+  1. Destination: Node ID (1-138)
+  2. Origin_1 to Origin_138: Distance matrix entries
+  3. node: Node identifier
+  4. ขยะทั่วไป (General Trash): General trash demand
+  5. ขยะ recycle (Recyclable Trash): Recyclable trash demand
+  6. รถคันที่ (Vehicle No.): Vehicle type label
+  7. cap for gereral (General Capacity): Vehicle general trash capacity
+  8. cap for recycle (Recycle Capacity): Vehicle recycle trash capacity
+  9. fix cost (Fixed Cost): Fixed cost per vehicle
+  10. variable cost (Variable Cost): Fuel cost per distance unit
+
+================================================================================
+NODE INFORMATION:
+================================================================================
+
+First 10 nodes detail:
+--------------------------------------------------------------------------------
+Node 1: general=15, recycle=5, vehicle=A
+Node 2: general=20, recycle=0, vehicle=B
+Node 3: general=0, recycle=0, vehicle=C
+Node 4: general=40, recycle=4, vehicle=nan
+Node 5: general=170, recycle=12, vehicle=nan
+Node 6: general=5, recycle=1, vehicle=nan
+Node 7: general=24, recycle=4, vehicle=nan
+Node 8: general=120, recycle=6, vehicle=nan
+Node 9: general=60, recycle=5, vehicle=nan
+Node 10: general=16, recycle=1, vehicle=nan
+
+Last 5 nodes detail:
+--------------------------------------------------------------------------------
+Node 136: general=12, recycle=2, vehicle=nan
+Node 137: general=10, recycle=0, vehicle=nan
+Node 138: general=จุดทิ้ง, recycle=จุดทิ้ง, vehicle=nan
+
+================================================================================
+SEARCHING FOR DEPOT (จุดทิ้ง):
+================================================================================
+
+  Found depot-like value in column 'ขยะทั่วไป': จุดทิ้ง
+  Found depot-like value in column 'ขยะ recycle': จุดทิ้ง
+================================================================================
+DISTANCE MATRIX ANALYSIS:
+================================================================================
+
+Distance Matrix Structure (first 10x10):
+--------------------------------------------------------------------------------
+From Node  1:    0   NaN   NaN   NaN   NaN   NaN   NaN   NaN   NaN   NaN
+From Node  2:  122   NaN   NaN   NaN   NaN   NaN   NaN   NaN   NaN   NaN
+From Node  3:  261  138   NaN   NaN   NaN   NaN   NaN   NaN   NaN   NaN
+From Node  4:  430  308  169   NaN   NaN   NaN   NaN   NaN   NaN   NaN
+From Node  5:  400  442  580  306   NaN   NaN   NaN   NaN   NaN   NaN
+From Node  6:  326  368  506  490  185   NaN   NaN   NaN   NaN   NaN
+From Node  7:  421  463  601  586  280   95   NaN   NaN   NaN   NaN
+From Node  8:  479  522  660  644  338  154  209   NaN   NaN   NaN
+From Node  9:  516  558  696  681  375  190   95  114   NaN   NaN
+From Node 10:  639  681  819  804  498  313  218  151  123   NaN
+
+NOTE: NaN values indicate upper triangular portion of symmetric matrix.
+The distance matrix is stored in lower triangular format.
+
+================================================================================
+VEHICLE TYPE ANALYSIS:
+================================================================================
+
+Unique vehicle types found: ['A', 'B', 'C']
+
+Vehicle specifications (from data):
+--------------------------------------------------------------------------------
+Vehicle A:
+  General capacity: 2000.0 units
+  Recycle capacity: 200.0 units
+  Fixed cost: 2400.0
+  Variable cost: 8.0 per distance unit
+
+Vehicle B:
+  General capacity: 2000.0 units
+  Recycle capacity: 200.0 units
+  Fixed cost: 2400.0
+  Variable cost: 8.0 per distance unit
+
+Vehicle C:
+  General capacity: 2000.0 units
+  Recycle capacity: 200.0 units
+  Fixed cost: 2400.0
+  Variable cost: 9.0 per distance unit
+
+================================================================================
+TRASH DEMAND ANALYSIS:
+================================================================================
+
+Trash demand statistics (first 20 non-depot nodes):
+--------------------------------------------------------------------------------
+Node   2: general=  20.0, recycle=   0.0
+Node   3: general=   0.0, recycle=   0.0
+Node   4: general=  40.0, recycle=   4.0
+Node   5: general= 170.0, recycle=  12.0
+Node   6: general=   5.0, recycle=   1.0
+Node   7: general=  24.0, recycle=   4.0
+Node   8: general= 120.0, recycle=   6.0
+Node   9: general=  60.0, recycle=   5.0
+Node  10: general=  16.0, recycle=   1.0
+Node  11: general=  30.0, recycle=   1.0
+Node  12: general=   8.0, recycle=   0.0
+Node  13: general=   7.0, recycle=   0.0
+Node  14: general=   2.0, recycle=   0.0
+Node  15: general=  19.0, recycle=   3.0
+Node  16: general=  10.0, recycle=   0.0
+Node  17: general=  17.0, recycle=   2.0
+Node  18: general=  10.0, recycle=   0.0
+Node  19: general=  15.0, recycle=   0.0
+Node  20: general=  11.0, recycle=   0.0
+Node  21: general=   3.0, recycle=   0.0
+
+Total demand (first 20 nodes): general=587.0, recycle=39.0
+
+================================================================================
+DATA ISSUES DETECTED:
+================================================================================
+
+  1. Distance matrix has NaN values - This is EXPECTED for upper triangular portion of symmetric matrix.
+  2. 1 rows have missing general trash demand.
+  3. 1 rows have missing recycle trash demand.
+  4. 137 rows have missing vehicle type data.
+
+================================================================================
+ASSUMPTIONS MADE:
+================================================================================
+
+1. DEPOT: Node 1 is the depot (no trash to collect)
+2. DISTANCE UNIT: Meters (based on distance values ~100-3000)
+3. CAPACITY UNIT: Kilograms or volume units
+4. COST UNIT: Thai Baht (THB)
+5. Distance matrix is symmetric: dist(i,j) = dist(j,i)
+6. Vehicles start and end at depot (Node 1)
+7. All trash must be collected from all non-depot nodes
+8. Vehicle capacities are per-trip (must return to depot to unload)
+

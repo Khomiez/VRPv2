@@ -1,0 +1,31 @@
+
+================================================================================
+INPUT GENERATION SUMMARY
+================================================================================
+  Total nodes: 138
+  Depot node: 138 (จุดทิ้ง (Depot))
+  Service nodes: 137
+  Vehicle types: 3
+  Total general demand: 2849.0
+  Total recycle demand: 174.0
+
+Vehicle specifications:
+  Type A:
+    - General capacity: 2000.0
+    - Recycle capacity: 200.0
+    - Fixed cost: 2400.0
+    - Variable cost: 8.0/unit
+  Type B:
+    - General capacity: 2000.0
+    - Recycle capacity: 200.0
+    - Fixed cost: 2400.0
+    - Variable cost: 8.0/unit
+  Type C:
+    - General capacity: 2000.0
+    - Recycle capacity: 200.0
+    - Fixed cost: 2400.0
+    - Variable cost: 9.0/unit
+
+Output saved to: d:/projects/python/VRPv2/vrp_input.json
+================================================================================
+
