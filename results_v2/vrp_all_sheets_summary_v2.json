@@ -1,0 +1,37 @@
+{
+  "20 ": {
+    "status": "OPTIMAL",
+    "vehicles": 1,
+    "distance_km": 5.298,
+    "total_cost": 2442.38,
+    "valid": true
+  },
+  "30": {
+    "status": "OPTIMAL",
+    "vehicles": 1,
+    "distance_km": 5.879,
+    "total_cost": 2447.03,
+    "valid": true
+  },
+  "50": {
+    "status": "OPTIMAL",
+    "vehicles": 1,
+    "distance_km": 8.394,
+    "total_cost": 2467.15,
+    "valid": true
+  },
+  "80": {
+    "status": "OPTIMAL",
+    "vehicles": 1,
+    "distance_km": 14.163,
+    "total_cost": 2513.3,
+    "valid": true
+  },
+  "138": {
+    "status": "OPTIMAL",
+    "vehicles": 2,
+    "distance_km": 37.43,
+    "total_cost": 5099.44,
+    "valid": true
+  }
+}

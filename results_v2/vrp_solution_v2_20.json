@@ -1,0 +1,51 @@
+{
+  "status": "OPTIMAL",
+  "num_vehicles_used": 1,
+  "total_distance_meters": 5298.0,
+  "total_distance_km": 5.298,
+  "total_fixed_cost": 2400.0,
+  "total_fuel_cost": 42.38,
+  "total_cost": 2442.38,
+  "validation": {
+    "all_nodes_visited": true,
+    "all_routes_valid": true,
+    "errors": []
+  },
+  "routes": [
+    {
+      "vehicle_id": 1,
+      "vehicle_type": "A",
+      "route": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        9,
+        8,
+        10,
+        11,
+        12,
+        19,
+        18,
+        17,
+        15,
+        16,
+        13,
+        14,
+        20,
+        1
+      ],
+      "distance_meters": 5298.0,
+      "distance_km": 5.298,
+      "general_load": 588.0,
+      "recycle_load": 44.0,
+      "fixed_cost": 2400.0,
+      "fuel_cost": 42.38,
+      "total_cost": 2442.38
+    }
+  ],
+  "sheet_name": "20 "
+}
