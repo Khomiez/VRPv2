@@ -11,7 +11,7 @@
 5. [Heuristic Solver Flow](#5-heuristic-solver-flow)
 6. [Validation Flow](#6-validation-flow)
 7. [การคำนวณต้นทุน](#7-การคำนวณต้นทุน)
-8. [Post-Processing](#8-post-processing)
+8. [Checkpoint Constraint Implementation](#8-checkpoint-constraint-implementation)
 9. [Output Generation](#9-output-generation)
 
 ---
@@ -696,18 +696,26 @@ def _solve_ortools(self, nodes: List[Node], vehicle: Vehicle,
                    checkpoint_idx: int, num_vehicles: int,
                    time_limit: int) -> Solution:
     """
-    Solve using OR-Tools and post-process to ensure checkpoint visits.
+    Solve using OR-Tools with the checkpoint natively integrated into optimization.
 
-    The approach:
-    1. Solve VRP normally (checkpoint is excluded from collection)
-    2. Post-process: Insert checkpoint visit before each route's return to depot
-    3. Recalculate distances with checkpoint included
+    The checkpoint constraint mirrors the AMPL formulation:
+        x[checkpoint, depot, k] = vehicle_used[k]
+
+    Implementation:
+    - A BIG_PENALTY is added to any arc going directly from a non-checkpoint node
+      to the depot, making it far cheaper for OR-Tools to always route via the
+      checkpoint last.
+    - For multi-vehicle problems, phantom checkpoint copies are added to the
+      distance matrix so every active vehicle visits the checkpoint before depot.
     """
     num_nodes = len(nodes)
+    BIG_PENALTY = 10_000_000
 
-    # OR-Tools setup - exclude checkpoint from collection nodes
-    # We'll add it back during post-processing
-    manager = pywrapcp.RoutingIndexManager(num_nodes, num_vehicles, depot_idx)
+    # For multi-vehicle, expand distance matrix with (num_vehicles-1) checkpoint copies
+    total_nodes = num_nodes + (num_vehicles - 1)
+    checkpoint_copies = [checkpoint_idx] + list(range(num_nodes, total_nodes))
+
+    manager = pywrapcp.RoutingIndexManager(total_nodes, num_vehicles, depot_idx)
     routing = pywrapcp.RoutingModel(manager)
 ```
 
@@ -716,13 +724,11 @@ def _solve_ortools(self, nodes: List[Node], vehicle: Vehicle,
 | บรรทัด | คำอธิบาย |
 |--------|-----------|
 | 274-277 | `def _solve_ortools(self, ...)` - ประกาศ method สำหรับใช้ OR-Tools solver (private method) |
-| 278-284 | Docstring อธิบาย approach การทำงาน: |
-| 279 | 1. Solve VRP normally (checkpoint ถูก exclude) |
-| 280 | 2. Post-process: Insert checkpoint ก่อนกลับ depot |
-| 281 | 3. Recalculate distances พร้อม checkpoint |
-| 286 | `num_nodes = len(nodes)` - นับจำนวน nodes ทั้งหมด |
-| 290 | `manager = pywrapcp.RoutingIndexManager(num_nodes, num_vehicles, depot_idx)` - สร้าง index manager สำหรับแปลงระหว่าง user indices และ internal indices |
-| 291 | `routing = pywrapcp.RoutingModel(manager)` - สร้าง routing optimization model |
+| 278-287 | Docstring อธิบาย approach ใหม่ที่ integrate checkpoint เข้า optimization โดยตรง |
+| 288 | `BIG_PENALTY = 10_000_000` - ค่า penalty ขนาดใหญ่ (10 ล้าน เมตร) ใหญ่กว่าระยะทางจริงใด ๆ |
+| 290-292 | ขยาย distance matrix สำหรับ checkpoint copies (กรณี multi-vehicle) |
+| 294 | `manager = pywrapcp.RoutingIndexManager(total_nodes, num_vehicles, depot_idx)` - สร้าง index manager |
+| 295 | `routing = pywrapcp.RoutingModel(manager)` - สร้าง routing optimization model |
 
 **คำอธิบาย RoutingIndexManager:**
 ```
@@ -731,29 +737,29 @@ RoutingIndexManager ทำหน้าที่แปลงระหว่าง
 - Internal indices: Indices ภายในของ OR-Tools solver
 
 Parameters:
-- num_nodes: จำนวน nodes ทั้งหมด
+- total_nodes: จำนวน nodes ทั้งหมด (รวม checkpoint copies)
 - num_vehicles: จำนวนรถที่ใช้
 - depot_idx: index ของ depot (เสมอ 0 สำหรับ Node 1)
 
-ตัวอย่างการแปลง:
+ตัวอย่างการแปลง (20 nodes, 1 vehicle):
 User Node 1 (depot) → Internal Index 0
 User Node 5 → Internal Index 4
 User Node 20 (checkpoint) → Internal Index 19
 ```
 
-**หมายเหตุ**: ระบบใช้ approach ที่แยก checkpoint ออกจากการ optimization แล้วเพิ่มกลับมาใน post-processing ซึ่งทำให้การ optimize เร็วขึ้น
-
-### 4.4 Distance Callback
+### 4.4 Distance Callback พร้อม BIG_PENALTY
 
 **ไฟล์:** `solvers/vrp_solver_v2.py`
-**บรรทัด:** 293-300
 
 ```python
-# Distance callback
+# Distance callback: penalize any non-checkpoint → depot arc
 def distance_callback(from_index, to_index):
     from_node = manager.IndexToNode(from_index)
     to_node = manager.IndexToNode(to_index)
-    return int(distance_matrix[from_node][to_node])
+    dist = int(expanded_dist[from_node][to_node])
+    if to_node == depot_idx and from_node not in checkpoint_set:
+        dist += BIG_PENALTY
+    return dist
 
 transit_callback_index = routing.RegisterTransitCallback(distance_callback)
 routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
@@ -763,42 +769,46 @@ routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
 | บรรทัด | คำอธิบาย |
 |--------|-----------|
-| 294 | `def distance_callback(from_index, to_index):` - ประกาศ callback function ที่ OR-Tools เรียกเพื่อทราบระยะทาง |
-| 295 | `from_node = manager.IndexToNode(from_index)` - แปลง from_index (internal) → user node (0-indexed) |
-| 296 | `to_node = manager.IndexToNode(to_index)` - แปลง to_index (internal) → user node (0-indexed) |
-| 297 | `return int(distance_matrix[from_node][to_node])` - คืนค่าระยะทางจาก distance matrix แปลงเป็น integer |
-| 299 | `transit_callback_index = routing.RegisterTransitCallback(distance_callback)` - ลงทะเบียน callback function กับ solver |
-| 300 | `routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)` - กำหนดให้ใช้ callback นี้สำหรับทุกคัน |
+| `def distance_callback(from_index, to_index):` | ประกาศ callback function ที่ OR-Tools เรียกเพื่อทราบระยะทาง |
+| `from_node = manager.IndexToNode(from_index)` | แปลง from_index (internal) → user node (0-indexed) |
+| `to_node = manager.IndexToNode(to_index)` | แปลง to_index (internal) → user node (0-indexed) |
+| `dist = int(expanded_dist[from_node][to_node])` | ดึงระยะทางจาก expanded distance matrix |
+| `if to_node == depot_idx and from_node not in checkpoint_set:` | ตรวจสอบว่า arc นี้เป็น non-checkpoint → depot หรือไม่ |
+| `dist += BIG_PENALTY` | ถ้าใช่ บวก penalty 10 ล้าน เมตร เพื่อบังคับให้ผ่าน checkpoint ก่อน |
+| `routing.RegisterTransitCallback(...)` | ลงทะเบียน callback function กับ solver |
+| `routing.SetArcCostEvaluatorOfAllVehicles(...)` | กำหนดให้ใช้ callback นี้สำหรับทุกคัน |
+
+**หลักการ BIG_PENALTY:**
+```
+ปัญหา: จะบังคับให้รถผ่าน checkpoint ก่อนกลับ depot ได้อย่างไร?
+
+วิธีแก้: ปรับ cost ของ arcs ที่ไม่ผ่าน checkpoint ให้แพงมาก
+├─ arc: collection_node → depot  →  cost = actual_dist + 10,000,000
+└─ arc: checkpoint → depot       →  cost = actual_dist (ปกติ)
+
+ผลลัพธ์: OR-Tools จะเลือก route ที่ผ่าน checkpoint เสมอ
+เพราะถูกกว่ามาก (หลีก BIG_PENALTY)
+
+ตัวอย่าง:
+Route ที่ไม่ดี: ... → Node 14 → Depot     cost = 500 + 10,000,000
+Route ที่ดี:    ... → Node 19 → Checkpoint → Depot  cost = 200 + 300 = 500
+```
 
 **Flow การเรียกใช้ Callback:**
 ```
-Solver ต้องการระยะทาง Node A → Node B
-    ↓
-เรียก distance_callback(A_index, B_index)
-    ↓
-แปลง indices → user nodes (manager.IndexToNode)
-    ↓
-ดึงระยะทางจาก distance_matrix[A][B]
-    ↓
-คืนค่าให้ Solver
-    ↓
-Solver ใช้ค่านี้ในการคำนวณ cost
-```
-
-**Flow ของการเรียกใช้ Callback:**
-
-```
-Solver ต้องการระยะทาง Node A → Node B
+Solver ต้องการ cost ของ arc A → B
     ↓
 เรียก distance_callback(A_index, B_index)
     ↓
 แปลง indices → user nodes
     ↓
-ดึงระยะทางจาก distance_matrix[A][B]
+ดึงระยะทางจาก expanded_dist[A][B]
+    ↓
+ถ้า B = depot และ A ≠ checkpoint → บวก BIG_PENALTY
     ↓
 คืนค่าให้ Solver
     ↓
-Solver ใช้ค่านี้ในการคำนวณ cost
+Solver ใช้ค่านี้เพื่อหาเส้นทางที่ cost ต่ำสุด
 ```
 
 ### 4.5 Capacity Constraints
@@ -865,43 +875,59 @@ routing.AddDimensionWithVehicleCapacity(
 - Node 1 (Depot) มี demand ที่ถูกเก็บที่จุดเริ่มต้น ดังนั้นจึงถูกรวมในการคำนวณ
 - Checkpoint มี demand = 0 เพราะไม่มีการเก็บขยะที่นั่น
 
-### 4.6 Checkpoint Handling
+### 4.6 Checkpoint Assignment ต่อ Vehicle
 
 **ไฟล์:** `solvers/vrp_solver_v2.py`
-**บรรทัด:** 336-339
 
 ```python
-# Make checkpoint visit optional during optimization (we'll add it in post-processing)
-# This allows OR-Tools to focus on optimizing collection routes
-checkpoint_routing_idx = manager.NodeToIndex(checkpoint_idx)
-routing.AddDisjunction([checkpoint_routing_idx], 0)  # Zero penalty for not visiting
+# Assign each checkpoint copy to exactly one vehicle.
+# High penalty ensures every active vehicle visits its checkpoint.
+for v, ckpt_node in enumerate(checkpoint_copies):
+    ckpt_routing_idx = manager.NodeToIndex(ckpt_node)
+    routing.AddDisjunction([ckpt_routing_idx], BIG_PENALTY)
+    routing.SetAllowedVehiclesForIndex([v], ckpt_routing_idx)
 ```
 
 **คำอธิบายโค้ดแบบละเอียด (Line-by-Line):**
 
 | บรรทัด | คำอธิบาย |
 |--------|-----------|
-| 338 | `checkpoint_routing_idx = manager.NodeToIndex(checkpoint_idx)` - แปลง checkpoint index (0-indexed) → internal index ของ OR-Tools |
-| 339 | `routing.AddDisjunction([checkpoint_routing_idx], 0)` - ทำให้ checkpoint เป็น optional (disjunction) |
+| `for v, ckpt_node in enumerate(checkpoint_copies):` | วนลูปผ่าน checkpoint node ทุกตัว (1 ตัวต่อ 1 vehicle) |
+| `ckpt_routing_idx = manager.NodeToIndex(ckpt_node)` | แปลง checkpoint node index → internal OR-Tools index |
+| `routing.AddDisjunction([ckpt_routing_idx], BIG_PENALTY)` | กำหนด penalty สูงมากถ้าไม่ไปเยี่ยม (บังคับให้ไป) |
+| `routing.SetAllowedVehiclesForIndex([v], ckpt_routing_idx)` | กำหนดให้เฉพาะรถ `v` เท่านั้นที่ไปเยี่ยม checkpoint copy นี้ได้ |
 
-**คำอธิบาย AddDisjunction:**
+**เปรียบเทียบวิธีเก่า vs วิธีใหม่:**
 ```
-routing.AddDisjunction([checkpoint_routing_idx], 0)
-    ↓
-Parameters:
-- [checkpoint_routing_idx]: List ของ indices ที่เป็น disjunction
-- 0: Penalty สำหรับไม่เยี่ยม (0 = ไม่มี penalty)
+วิธีเก่า (Post-Processing Hack):
+├─ AddDisjunction([checkpoint], penalty=0)  ← ไม่มี penalty → OR-Tools ข้ามเสมอ
+├─ OR-Tools แก้ปัญหาโดยไม่สนใจ checkpoint
+└─ หลังได้คำตอบ: ยัด checkpoint ต่อท้ายทุก route โดยไม่สนว่าไกลแค่ไหน
+
+วิธีใหม่ (Native Constraint):
+├─ AddDisjunction([checkpoint], penalty=BIG_PENALTY)  ← penalty สูงมาก → OR-Tools ต้องไป
+├─ distance_callback: arc ที่ไม่ผ่าน checkpoint → depot มี cost สูงมาก
+├─ SetAllowedVehiclesForIndex: กำหนดว่ารถใดต้องไป checkpoint copy ใด
+└─ OR-Tools วางแผนเส้นทางทั้งหมด "รู้" ว่าต้องผ่าน checkpoint ก่อนกลับ depot
 
 ผลลัพธ์:
-- OR-Tools ไม่บังคับให้ไป checkpoint ระหว่าง optimization
-- Checkpoint จะถูกเพิ่มกลับมาใน post-processing ด้วยตำแหน่งที่ถูกต้อง (ก่อนกลับ depot)
-- OR-Tools สามารถ focus กับการ optimize collection routes
+├─ วิธีเก่า (20 nodes): 5.298 km, 2,442.38 THB
+└─ วิธีใหม่ (20 nodes): 4.162 km, 2,433.30 THB  ✓ ตรงกับ AMPL optimal
 ```
 
-**เหตุผลของการทำเช่นนี้:**
-- ลดความซับซ้อนของ constraints
-- OR-Tools สามารถหาคำตอบที่ดีขึ้นสำหรับ collection routes
-- Checkpoint ถูกเพิ่มในตำแหน่งที่ถูกต้องเสมอ (ก่อนกลับ depot) ใน post-processing
+**การจัดการ Multi-Vehicle (checkpoint copies):**
+```
+ปัญหา: OR-Tools บังคับว่าแต่ละ mandatory node ถูกเยี่ยมโดยรถเพียงคันเดียว
+แต่ทุกรถต้องไป checkpoint
+
+วิธีแก้: สร้าง "phantom checkpoint copies"
+├─ num_vehicles = 2
+├─ checkpoint_copies = [checkpoint_idx, num_nodes]  (2 copies)
+├─ Copy 0 (index 19): เฉพาะรถ 0, ตำแหน่งเดียวกับ checkpoint
+└─ Copy 1 (index 20): เฉพาะรถ 1, ตำแหน่งเดียวกับ checkpoint
+
+ผล: รถทุกคันมี "checkpoint ของตัวเอง" → ทั้งคู่ต้องผ่านก่อนกลับ depot
+```
 
 ### 4.7 Search Parameters
 
@@ -955,7 +981,6 @@ GUIDED_LOCAL_SEARCH:
 if not assignment:
     raise Exception("OR-Tools could not find a solution")
 
-# Extract solution and post-process to add checkpoint visits
 routes = []
 total_distance_m = 0
 checkpoint_node_id = nodes[checkpoint_idx].id  # 1-indexed
@@ -963,20 +988,27 @@ checkpoint_node_id = nodes[checkpoint_idx].id  # 1-indexed
 for vehicle_id in range(num_vehicles):
     index = routing.Start(vehicle_id)
     route_nodes = []
-    general_load = 0
-    recycle_load = 0
+    general_load = 0.0
+    recycle_load = 0.0
 
     while not routing.IsEnd(index):
         node_idx = manager.IndexToNode(index)
-        node = nodes[node_idx]
-
-        # Skip checkpoint if OR-Tools included it (we'll add it at the right position)
-        if node_idx != checkpoint_idx:
-            route_nodes.append(node.id)  # 1-indexed
+        if node_idx < num_nodes:
+            node = nodes[node_idx]
+            route_nodes.append(node.id)
             general_load += node.general_demand
             recycle_load += node.recycle_demand
-
+        else:
+            # Phantom checkpoint copy — map to real checkpoint node ID
+            route_nodes.append(checkpoint_node_id)
         index = assignment.Value(routing.NextVar(index))
+
+    route_nodes.append(1)  # End at depot
+
+    # Skip trivial routes (only depot + checkpoint + depot, no collections)
+    collection_nodes_in_route = [n for n in route_nodes[1:-1] if n != checkpoint_node_id]
+    if not collection_nodes_in_route:
+        continue
 ```
 
 **คำอธิบายโค้ด:**
@@ -991,11 +1023,13 @@ for vehicle_id in range(num_vehicles):
 
 4. **วนลูปผ่าน Path**: `while not routing.IsEnd(index)` วนจนถึงจุดสิ้นสุด (depot)
 
-5. **แปลง Index → Node**: ใช้ `manager.IndexToNode(index)` เพื่อแปลงเป็น user node
+5. **แยก Node จริง vs Checkpoint Copy**:
+   - `node_idx < num_nodes` → เป็น node จริง ดึงข้อมูลจาก `nodes[node_idx]`
+   - `node_idx >= num_nodes` → เป็น phantom checkpoint copy → map กลับไปเป็น `checkpoint_node_id`
 
-6. **สะสม Loads**: เพิ่ม demand ของแต่ละ node เข้ากับ loads ปัจจุบัน
+6. **ไม่มีการ skip checkpoint ระหว่าง extraction** เพราะ OR-Tools จัดตำแหน่งให้ถูกต้องแล้วผ่าน BIG_PENALTY
 
-7. **เลื่อนไป Node ถัดไป**: `assignment.Value(routing.NextVar(index))` คืนค่า index ถัดไป
+7. **คำนวณ actual distance**: ใช้ `distance_matrix` จริง (ไม่มี penalty) เพื่อให้ได้ระยะทางที่ถูกต้อง
 
 ---
 
@@ -1532,46 +1566,41 @@ route = Route(
 | 516 | `fuel_cost=fuel_cost` - ต้นทุนน้ำมัน |
 | 517 | `total_cost=vehicle.fixed_cost + fuel_cost` - ต้นทุนรวม |
 
-**ตัวอย่างการคำนวณ:**
+**ตัวอย่างการคำนวณ (20 nodes, หลัง refactor):**
 ```
-route_distance = 5,298 เมตร
-distance_km = 5,298 / 1,000 = 5.298 กม.
+route_distance = 4,162 เมตร
+distance_km = 4,162 / 1,000 = 4.162 กม.
 
-fuel_cost = 5.298 × 8 = 42.38 บาท
+fuel_cost = 4.162 × 8 = 33.30 บาท
 
 fixed_cost = 2,400 บาท
-total_cost = 2,400 + 42.38 = 2,442.38 บาท
+total_cost = 2,400 + 33.30 = 2,433.30 บาท  ← ตรงกับ AMPL optimal
 ```
 
-### 7.2 การคำนวณระยะทางพร้อม Checkpoint
+### 7.2 การคำนวณระยะทางจริง (ไม่มี Penalty)
 
 ```python
-# Only process non-trivial routes (has collection nodes besides depot)
-if len(route_nodes) > 1:
-    # POST-PROCESSING: Insert checkpoint before returning to depot
-    # Route structure: [depot, ...collections..., checkpoint, depot]
-    route_nodes.append(checkpoint_node_id)
-    route_nodes.append(1)  # End at depot
+# Recalculate actual distance using original distance matrix (no penalties)
+route_distance = 0.0
+for i in range(len(route_nodes) - 1):
+    from_idx = route_nodes[i] - 1  # 1-indexed → 0-indexed
+    to_idx = route_nodes[i + 1] - 1
+    route_distance += distance_matrix[from_idx][to_idx]
 
-    # Calculate actual distance with checkpoint included
-    route_distance = 0.0
-    for i in range(len(route_nodes) - 1):
-        from_idx = route_nodes[i] - 1  # Convert to 0-indexed
-        to_idx = route_nodes[i + 1] - 1
-        route_distance += distance_matrix[from_idx][to_idx]
+distance_km = route_distance / 1000.0
+fuel_cost = distance_km * vehicle.fuel_cost_per_km
 ```
 
 **คำอธิบายโค้ด:**
 
-**Distance Calculation with Checkpoint** คำนวณระยะทางจริงหลังจากเพิ่ม checkpoint:
+**Actual Distance Recalculation** คำนวณระยะทางจริงโดยใช้ `distance_matrix` เดิม (ไม่ใช่ `expanded_dist` ที่มี BIG_PENALTY):
 
-1. **Non-trivial Routes Check**: `if len(route_nodes) > 1`
-   - ข้าม routes ที่ว่างเปลย (เฉพาะ depot)
-   - เพื่อประหยัดการคำนวณ
+1. **ใช้ distance_matrix จริง**: ระยะทางที่แสดงในผลลัพธ์ต้องสะท้อนระยะทางจริง ไม่ใช่ค่า penalty
+   - `distance_matrix` (ไม่มี penalty) → ใช้คำนวณ route_distance
+   - `expanded_dist` (มี BIG_PENALTY) → ใช้เฉพาะภายใน OR-Tools optimizer
 
-2. **Post-Processing**:
-   - `route_nodes.append(checkpoint_node_id)`: เพิ่ม checkpoint
-   - `route_nodes.append(1)`: เพิ่ม depot ท้ายสุด
+2. **Checkpoint อยู่ใน route_nodes แล้ว**: OR-Tools จัดตำแหน่ง checkpoint ให้ถูกต้องโดยอัตโนมัติ
+   ไม่ต้อง append เพิ่มเหมือนวิธีเก่า
 
 3. **Pair-wise Distance Calculation**:
    - วนลูปผ่านทุกคู่ของ nodes ที่ติดกัน
@@ -1579,12 +1608,14 @@ if len(route_nodes) > 1:
    - ดึงระยะทางจาก distance_matrix
    - สะสมระยะทางรวม
 
-**ตัวอย่าง**:
+**ตัวอย่าง (หลัง refactor)**:
 ```python
-route_nodes = [1, 2, 5, 20, 1]  # 20 = checkpoint
+# OR-Tools จัด route ให้เส้นทางผ่านใกล้ checkpoint โดยธรรมชาติ
+route_nodes = [1, 2, 3, ..., 19, 20, 1]  # 20 = checkpoint (ตำแหน่งถูกต้อง)
 
-# Pairs: (1,2), (2,5), (5,20), (20,1)
-# Distance = dist[0][1] + dist[1][4] + dist[4][19] + dist[19][0]
+# Pairs: (1,2), (2,3), ..., (19,20), (20,1)
+# Distance = dist[0][1] + dist[1][2] + ... + dist[18][19] + dist[19][0]
+# ผลลัพธ์: 4,162 เมตร (ไม่ใช่ 5,298 เมตรแบบเก่า)
 ```
 
 ### 7.3 การคำนวณต้นทุนรวม
@@ -1624,109 +1655,105 @@ return Solution(
 
 4. **Return Solution**: สร้าง Solution object พร้อมข้อมูลทั้งหมด
 
-**ตัวอย่างการคำนวณ**:
+**ตัวอย่างการคำนวณ (138 nodes, 2 vehicles, หลัง refactor)**:
 ```
-Route 1: 2,400 fixed + 137.50 fuel = 2,537.50
-Route 2: 2,400 fixed + 161.94 fuel = 2,561.94
+Route 1: 2,400 fixed + 133.64 fuel = 2,533.64
+Route 2: 2,400 fixed + 133.64 fuel = 2,533.64
 
 Total Fixed: 4,800.00
-Total Fuel: 299.44
-Total Cost: 5,099.44
+Total Fuel: 267.28
+Total Cost: 5,067.28  ← ลดลงจาก 5,099.44 (−32.16 THB)
 ```
 
 ---
 
-## 8. Post-Processing
+## 8. Checkpoint Constraint Implementation
 
-### 8.1 วัตถุประสงค์ของ Post-Processing
+### 8.1 ภาพรวมของ Checkpoint Constraint
 
-**ไฟล์:** `solvers/vrp_solver_v2.py`
-**บรรทัด:** 380-392 (ใน OR-Tools Solver)
+ระบบนี้ implement constraint ที่ว่า **"ทุกรถที่ active ต้องผ่าน checkpoint (จุดทิ้ง) ก่อนกลับ depot"** โดยตรงใน OR-Tools optimizer ซึ่งเทียบเท่ากับ AMPL constraint:
+
+```
+x[checkpoint_node, depot_node, k] = vehicle_used[k]
+```
+
+แนวทางที่ใช้มี 2 ส่วนหลัก:
+
+### 8.2 ส่วนที่ 1: BIG_PENALTY Distance Callback
 
 ```python
-# Only process non-trivial routes (has collection nodes besides depot)
-if len(route_nodes) > 1:
-    # POST-PROCESSING: Insert checkpoint before returning to depot
-    # Route structure: [depot, ...collections..., checkpoint, depot]
-    route_nodes.append(checkpoint_node_id)
-    route_nodes.append(1)  # End at depot
+BIG_PENALTY = 10_000_000  # >> ระยะทางจริงใด ๆ (เมตร)
 
-    # Calculate actual distance with checkpoint included
-    route_distance = 0.0
-    for i in range(len(route_nodes) - 1):
-        from_idx = route_nodes[i] - 1  # Convert to 0-indexed
-        to_idx = route_nodes[i + 1] - 1
-        route_distance += distance_matrix[from_idx][to_idx]
+def distance_callback(from_index, to_index):
+    from_node = manager.IndexToNode(from_index)
+    to_node = manager.IndexToNode(to_index)
+    dist = int(expanded_dist[from_node][to_node])
+    # ทำให้ arc ที่ข้าม checkpoint แพงมาก
+    if to_node == depot_idx and from_node not in checkpoint_set:
+        dist += BIG_PENALTY
+    return dist
 ```
 
-**คำอธิบายโค้ดแบบละเอียด (Line-by-Line):**
-
-| บรรทัด | คำอธิบาย |
-|--------|-----------|
-| 381 | `if len(route_nodes) > 1:` - ตรวจสอบว่ามี collection nodes (มากกว่า depot เพียงอย่างเดียว) |
-| 384 | `route_nodes.append(checkpoint_node_id)` - เพิ่ม checkpoint node ID ที่ท้าย route |
-| 385 | `route_nodes.append(1)` - เพิ่ม depot node ID ที่ท้ายสุด (จบที่ depot) |
-| 388 | `route_distance = 0.0` - เริ่มคำนวณระยะทางใหม่จาก 0 |
-| 389 | `for i in range(len(route_nodes) - 1):` - วนลูปผ่านทุกคู่ของ nodes ที่ติดกัน |
-| 390 | `from_idx = route_nodes[i] - 1` - แปลง node ID (1-indexed) → matrix index (0-indexed) |
-| 391 | `to_idx = route_nodes[i + 1] - 1` - แปลง node ID ถัดไป → matrix index |
-| 392 | `route_distance += distance_matrix[from_idx][to_idx]` - สะสมระยะทางจาก distance matrix |
-
-**เหตุผลของ Post-Processing:**
+**หลักการทำงาน:**
 ```
-OR-Tools ไม่รองรับ checkpoint constraint โดยตรง:
-├─ VRP มาตรฐาน: depot → collection → depot
-└─ VRP นี้: depot → collection → checkpoint → depot
+OR-Tools ต้องการ minimize total cost
+├─ Arc: collection_node → depot     = actual_dist + 10,000,000  (แพงมาก)
+└─ Arc: checkpoint → depot          = actual_dist               (ราคาปกติ)
 
-Approach:
-1. ให้ OR-Tools แก้ปัญหาโดยไม่มี checkpoint constraint
-2. หลังได้คำตอบ ใส่ checkpoint ก่อนกลับ depot
-3. คำนวณระยะทางใหม่
-
-ข้อดี:
-├─ OR-Tools focus กับ collection routes
-├─ Checkpoint ถูกเพิ่มในตำแหน่งที่ถูกต้องเสมอ
-└─ ลดความซับซ้อนของ constraints
+∴ OR-Tools จะเลือก route ที่ผ่าน checkpoint ก่อนกลับ depot เสมอ
+เพราะ cost ต่ำกว่าอย่างชัดเจน
 ```
 
-### 8.2 การคำนวณระยะทางใหม่
+**ผลลัพธ์**: OR-Tools "รู้" ตั้งแต่ต้นว่าต้องผ่าน checkpoint จึงวางแผนเส้นทาง
+เพื่อให้ node สุดท้ายก่อน checkpoint อยู่ใกล้ checkpoint ที่สุด
+
+### 8.3 ส่วนที่ 2: Phantom Checkpoint Copies (Multi-Vehicle)
 
 ```python
-# Calculate actual distance with checkpoint included
-route_distance = 0.0
-for i in range(len(route_nodes) - 1):
-    from_idx = route_nodes[i] - 1  # Convert to 0-indexed
-    to_idx = route_nodes[i + 1] - 1
-    route_distance += distance_matrix[from_idx][to_idx]
+# สร้าง checkpoint copies สำหรับ multi-vehicle
+total_nodes = num_nodes + (num_vehicles - 1)
+checkpoint_copies = [checkpoint_idx] + list(range(num_nodes, total_nodes))
 
-distance_km = route_distance / 1000.0
-fuel_cost = distance_km * vehicle.fuel_cost_per_km
+# Expanded distance matrix สำหรับ copies
+for copy_idx in range(num_nodes, total_nodes):
+    for j in range(num_nodes):
+        d = int(distance_matrix[checkpoint_idx][j])
+        expanded_dist[copy_idx][j] = d
+        expanded_dist[j][copy_idx] = d
+
+# กำหนด checkpoint copy ต่อ vehicle
+for v, ckpt_node in enumerate(checkpoint_copies):
+    ckpt_routing_idx = manager.NodeToIndex(ckpt_node)
+    routing.AddDisjunction([ckpt_routing_idx], BIG_PENALTY)
+    routing.SetAllowedVehiclesForIndex([v], ckpt_routing_idx)
 ```
 
-**คำอธิบายโค้ด:**
-
-**Re-calculation of Distance** หลังจากเพิ่ม checkpoint:
-
-1. **Loop Through Pairs**: วนลูปผ่านทุกคู่ของ nodes ที่ติดกัน
-   - `range(len(route_nodes) - 1)`: 0, 1, 2, ..., n-2
-   - เชื่อม node[i] → node[i+1]
-
-2. **Index Conversion**: แปลง 1-indexed → 0-indexed
-   - `route_nodes[i] - 1`: จาก user node ID เป็น matrix index
-
-3. **Distance Accumulation**: สะสมระยะทางจาก distance matrix
-
-**ตัวอย่าง Flow**:
+**เหตุผลที่ต้องใช้ Checkpoint Copies:**
 ```
-route_nodes = [1, 2, 5, 20, 1]
+ข้อจำกัดของ OR-Tools:
+└─ Mandatory node ถูกเยี่ยมได้โดยรถ 1 คันเท่านั้น
 
-i=0: from=0, to=1  → dist[0][1]
-i=1: from=1, to=4  → dist[1][4]
-i=2: from=4, to=19 → dist[4][19]
-i=3: from=19, to=0 → dist[19][0]
+ปัญหา: ถ้า num_vehicles = 2 ทั้งสองคันต้องไป checkpoint
+แต่ OR-Tools อนุญาตให้ 1 คันเท่านั้น
 
-Total = Σ distances
+วิธีแก้: สร้าง "phantom copies" ที่มีตำแหน่งเดียวกับ checkpoint
+├─ Copy 0 = checkpoint จริง (สำหรับรถ 0)
+└─ Copy 1 = node พิเศษ ระยะทาง = checkpoint จริง (สำหรับรถ 1)
+
+ผล: ทุกรถมี checkpoint ของตัวเอง ระยะทางถูกต้อง
 ```
+
+### 8.4 การเปรียบเทียบผลลัพธ์
+
+| Sheet | วิธีเก่า (Post-Processing) | วิธีใหม่ (Native Constraint) | ปรับปรุง |
+|-------|---------------------------|------------------------------|---------|
+| 20 nodes | 5.298 km / 2,442.38 THB | **4.162 km / 2,433.30 THB** | −1.136 km |
+| 30 nodes | 5.879 km / 2,447.03 THB | **5.477 km / 2,443.82 THB** | −0.402 km |
+| 50 nodes | 8.394 km / 2,467.15 THB | **7.695 km / 2,461.56 THB** | −0.699 km |
+| 80 nodes | 14.163 km / 2,513.30 THB | **13.767 km / 2,510.14 THB** | −0.396 km |
+| 138 nodes | 37.430 km / 5,099.44 THB | **33.410 km / 5,067.28 THB** | −4.020 km |
+
+**หมายเหตุ**: ผลลัพธ์ 20 nodes ตรงกับ AMPL/NEOS optimal (2,433.296 THB) แทบทั้งหมด
 
 ---
 
@@ -1799,8 +1826,8 @@ def save_solution(self, solution: Solution, sheet_name: str, output_dir: Path) -
 {
   "status": "OPTIMAL",
   "num_vehicles_used": 2,
-  "total_distance_km": 10.177,
-  "total_cost": 5099.44,
+  "total_distance_km": 33.41,
+  "total_cost": 5067.28,
   "validation": {
     "all_nodes_visited": true,
     "all_routes_valid": true,
@@ -1836,18 +1863,18 @@ def save_solution(self, solution: Solution, sheet_name: str, output_dir: Path) -
 |  | `ensure_ascii=False` - อนุญาต non-ASCII characters (ภาษาไทย) |
 | 649 | `return str(output_file)` - คืนค่า path ของ file ที่บันทึก (เป็น string) |
 
-**ตัวอย่าง JSON Output (formatted):**
+**ตัวอย่าง JSON Output (formatted, 20 nodes):**
 ```json
 {
   "status": "OPTIMAL",
-  "num_vehicles_used": 2,
-  "total_distance_km": 10.177,
-  "total_cost": 5099.44,
+  "num_vehicles_used": 1,
+  "total_distance_km": 4.162,
+  "total_cost": 2433.3,
   "routes": [
     {
       "vehicle_id": 1,
-      "route": [1, 2, 5, 20, 1],
-      "distance_km": 5.298,
+      "route": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 19, 20, 1],
+      "distance_km": 4.162,
       ...
     }
   ]

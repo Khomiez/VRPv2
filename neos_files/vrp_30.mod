@@ -1,4 +1,4 @@
-# VRP Model for NEOS Server - 20 Nodes
+# VRP Model for NEOS Server - 30 Nodes
 # Capacitated Vehicle Routing Problem with Heterogeneous Fleet
 
 # Sets (Data Collections)

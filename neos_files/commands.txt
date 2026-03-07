@@ -1,0 +1,14 @@
+solve;
+
+printf "\n========================================\n";
+printf "FINAL OPTIMAL COST: %.3f THB\n", Total_Cost;
+printf "========================================\n\n";
+
+for {k in VEHICLES: vehicle_used[k] > 0.5} {
+    printf "--- VEHICLE %s ACTIVE ROUTE EDGES ---\n", k;
+    
+    for {i in NODES, j in NODES: x[i,j,k] > 0.5} {
+        printf "  Node %-3s  -->  Node %-3s\n", i, j;
+    }
+    printf "\n";
+}

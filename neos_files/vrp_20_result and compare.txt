@@ -1,0 +1,104 @@
+neos result:
+*************************************************************
+
+   NEOS Server Version 6.0
+   Job#     : 18515240
+   Password : rEYdiFsR
+   User     : judzuii
+   Solver   : milp:Cbc:AMPL
+   Start    : 2026-03-07 01:50:31
+   End      : 2026-03-07 01:50:39
+   Host     : prod-sub-1.neos-server.org
+
+   Disclaimer:
+
+   This information is provided without any express or
+   implied warranty. In particular, there is no warranty
+   of any kind concerning the fitness of this
+   information for any particular purpose.
+
+   Announcements:
+*************************************************************
+You are using the solver cbc.
+Checking ampl.mod for cbc_options...
+Checking ampl.com for cbc_options...
+Executing AMPL.
+processing data.
+processing commands.
+Executing on prod-exec-1.neos-server.org
+
+Presolve eliminates 61 constraints and 60 variables.
+Adjusted problem:
+1200 variables:
+	1143 binary variables
+	57 linear variables
+1175 constraints, all linear; 8343 nonzeros
+	86 equality constraints
+	1089 inequality constraints
+1 linear objective; 1143 nonzeros.
+
+CBC 2.10.10: CBC 2.10.10 optimal, objective 2433.296
+96 nodes, 8171 iterations, 6.37356 seconds
+
+========================================
+FINAL OPTIMAL COST: 2433.296 THB
+========================================
+
+--- VEHICLE A ACTIVE ROUTE EDGES ---
+  Node 1    -->  Node 2  
+  Node 2    -->  Node 3  
+  Node 3    -->  Node 4  
+  Node 4    -->  Node 5  
+  Node 5    -->  Node 6  
+  Node 6    -->  Node 7  
+  Node 7    -->  Node 15 
+  Node 8    -->  Node 10 
+  Node 9    -->  Node 8  
+  Node 10   -->  Node 11 
+  Node 11   -->  Node 12 
+  Node 12   -->  Node 19 
+  Node 13   -->  Node 9  
+  Node 14   -->  Node 13 
+  Node 15   -->  Node 17 
+  Node 16   -->  Node 14 
+  Node 17   -->  Node 18 
+  Node 18   -->  Node 16 
+  Node 19   -->  Node 20 
+  Node 20   -->  Node 1  
+
+
+compared to results_v2\vrp_solution_v2_20.json
+
+Gemini บอกว่า
+This is the ultimate side-by-side showdown between Heuristic Programming (OR-Tools) and Global Mathematical Optimization (AMPL/NEOS).
+
+Looking at this comparison, you can see exactly why verifying with a MILP solver on NEOS is highly recommended. Your AMPL model absolutely crushed the OR-Tools result!
+
+Here is the breakdown of the exact differences:
+
+1. The Numbers: AMPL Saves 1.1+ Kilometers
+Metric	Python OR-Tools	AMPL (NEOS CPLEX/CBC)	The Difference
+Total Cost	2,442.38 THB	2,433.296 THB	AMPL is 9.08 THB cheaper
+Fuel Cost	42.38 THB	33.296 THB	-
+Total Distance	5.298 km (5,298 m)	4.162 km (4,162 m)	AMPL is 1.136 km shorter!
+Vehicles Used	1	1	Same
+By finding the true mathematical optimum, AMPL shaved off over a full kilometer of driving for just this small 20-node problem.
+
+2. The Route Comparison: Where OR-Tools Failed
+Look closely at the very end of the two routes.
+
+OR-Tools Route: 1 -> 2 -> ... -> 16 -> 13 -> 14 -> 20 (Checkpoint) -> 1
+
+AMPL Route: 1 -> 2 -> ... -> 11 -> 12 -> 19 -> 20 (Checkpoint) -> 1
+
+The OR-Tools "Blindspot":
+If you recall how you built vrp_solver_v2.py, you specifically instructed OR-Tools to ignore the checkpoint during the actual route optimization to make it run faster (using routing.AddDisjunction([checkpoint_routing_idx], 0)). It built a route expecting to go straight from Node 14 back to the Depot (Node 1).
+Then, in your post-processing code, Python ruthlessly chopped the route and forced Node 20 into the sequence just before the Depot. Because Node 14 is likely physically far away from Node 20, that sudden, forced jump 14 -> 20 added over a kilometer of unnecessary driving distance.
+
+The AMPL "Foresight":
+Because you wrote Constraint 13 in AMPL (x[checkpoint_node, depot_node, k] = vehicle_used[k]), the NEOS solver knew from the very first millisecond of calculation that the route had to end at Node 20. Therefore, it strategically wove its way through the map so that the final customer it visited (Node 19) was physically located right next to the Checkpoint.
+
+What This Means For You
+Your Python code is not "broken"; it is working exactly as you designed it using a "Heuristic" approach. Heuristics are designed to find "good enough" answers very quickly, but as you can see, they sometimes leave efficiency on the table because they make localized decisions instead of global ones.
+
+By building this AMPL model, you have successfully proven the exact gap between your software's heuristic approximation and the true mathematical reality!

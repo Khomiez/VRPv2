@@ -16,6 +16,14 @@ Key differences from v1:
 - Node 1 has demand that is collected at start
 - "จุดทิ้ง" is a mandatory checkpoint, not the depot
 - Fuel cost uses distance in km (distance_m / 1000)
+
+Checkpoint constraint implementation (mirrors AMPL formulation):
+- The checkpoint is included natively in OR-Tools optimization via a BIG_PENALTY
+  on any arc that goes directly from a non-checkpoint node to the depot.
+- This eliminates the old post-processing hack of blindly appending the checkpoint,
+  allowing OR-Tools to plan routes that end near the checkpoint for minimum distance.
+- For multi-vehicle problems, phantom checkpoint copies (one per vehicle) are added
+  to the model so every active vehicle is forced to route through its checkpoint last.
 """
 
 import pandas as pd
@@ -276,54 +284,74 @@ class VRPSolverV2:
                        checkpoint_idx: int, num_vehicles: int,
                        time_limit: int) -> Solution:
         """
-        Solve using OR-Tools and post-process to ensure checkpoint visits.
+        Solve using OR-Tools with the checkpoint natively integrated into optimization.
 
-        The approach:
-        1. Solve VRP normally (checkpoint is excluded from collection)
-        2. Post-process: Insert checkpoint visit before each route's return to depot
-        3. Recalculate distances with checkpoint included
+        The checkpoint constraint mirrors the AMPL formulation:
+            x[checkpoint, depot, k] = vehicle_used[k]
+
+        Implementation:
+        - A BIG_PENALTY is added to any arc going directly from a non-checkpoint node
+          to the depot, making it far cheaper for OR-Tools to always route via the
+          checkpoint last.
+        - For multi-vehicle problems, (num_vehicles - 1) phantom checkpoint copies are
+          added to the distance matrix (same location, zero demand) and each copy is
+          restricted to one vehicle via SetAllowedVehiclesForIndex, so every active
+          vehicle is forced to visit the checkpoint before returning to depot.
         """
         num_nodes = len(nodes)
+        BIG_PENALTY = 10_000_000  # >> any realistic route distance in meters
 
-        # OR-Tools setup - exclude checkpoint from collection nodes
-        # We'll add it back during post-processing
-        manager = pywrapcp.RoutingIndexManager(num_nodes, num_vehicles, depot_idx)
+        # --- Build expanded distance matrix for checkpoint copies ---
+        # checkpoint_copies[v] = the node index that vehicle v must visit as checkpoint
+        total_nodes = num_nodes + (num_vehicles - 1)
+        checkpoint_copies = [checkpoint_idx] + list(range(num_nodes, total_nodes))
+
+        expanded_dist = np.zeros((total_nodes, total_nodes), dtype=np.int64)
+        expanded_dist[:num_nodes, :num_nodes] = distance_matrix.astype(np.int64)
+        for copy_idx in range(num_nodes, total_nodes):
+            for j in range(num_nodes):
+                d = int(distance_matrix[checkpoint_idx][j])
+                expanded_dist[copy_idx][j] = d
+                expanded_dist[j][copy_idx] = d
+
+        checkpoint_set = set(checkpoint_copies)
+
+        # --- OR-Tools model ---
+        manager = pywrapcp.RoutingIndexManager(total_nodes, num_vehicles, depot_idx)
         routing = pywrapcp.RoutingModel(manager)
 
-        # Distance callback
+        # Distance callback: penalize any non-checkpoint → depot arc so OR-Tools
+        # always prefers routing through the checkpoint last.
         def distance_callback(from_index, to_index):
             from_node = manager.IndexToNode(from_index)
             to_node = manager.IndexToNode(to_index)
-            return int(distance_matrix[from_node][to_node])
+            dist = int(expanded_dist[from_node][to_node])
+            if to_node == depot_idx and from_node not in checkpoint_set:
+                dist += BIG_PENALTY
+            return dist
 
         transit_callback_index = routing.RegisterTransitCallback(distance_callback)
         routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
 
-        # Demand callbacks for capacity constraints
-        # Note: Depot (Node 1) demand is collected at start, so include it
-        # Checkpoint has zero demand
-        general_demands = [int(n.general_demand) for n in nodes]
-        recycle_demands = [int(n.recycle_demand) for n in nodes]
+        # Demand callbacks (checkpoint copies have zero demand)
+        expanded_general = [int(n.general_demand) for n in nodes] + [0] * (num_vehicles - 1)
+        expanded_recycle = [int(n.recycle_demand) for n in nodes] + [0] * (num_vehicles - 1)
 
         def demand_general_callback(from_index):
-            from_node = manager.IndexToNode(from_index)
-            return general_demands[from_node]
+            return expanded_general[manager.IndexToNode(from_index)]
 
         def demand_recycle_callback(from_index):
-            from_node = manager.IndexToNode(from_index)
-            return recycle_demands[from_node]
+            return expanded_recycle[manager.IndexToNode(from_index)]
 
-        # Add general capacity dimension
         demand_gen_callback_index = routing.RegisterUnaryTransitCallback(demand_general_callback)
         routing.AddDimensionWithVehicleCapacity(
             demand_gen_callback_index,
-            0,  # no slack
+            0,
             [int(vehicle.general_capacity)] * num_vehicles,
-            True,  # start cumul to zero
+            True,
             'GeneralCapacity'
         )
 
-        # Add recycle capacity dimension
         demand_rec_callback_index = routing.RegisterUnaryTransitCallback(demand_recycle_callback)
         routing.AddDimensionWithVehicleCapacity(
             demand_rec_callback_index,
@@ -333,10 +361,12 @@ class VRPSolverV2:
             'RecycleCapacity'
         )
 
-        # Make checkpoint visit optional during optimization (we'll add it in post-processing)
-        # This allows OR-Tools to focus on optimizing collection routes
-        checkpoint_routing_idx = manager.NodeToIndex(checkpoint_idx)
-        routing.AddDisjunction([checkpoint_routing_idx], 0)  # Zero penalty for not visiting
+        # Assign each checkpoint copy to exactly one vehicle.
+        # High penalty ensures every active vehicle visits its checkpoint.
+        for v, ckpt_node in enumerate(checkpoint_copies):
+            ckpt_routing_idx = manager.NodeToIndex(ckpt_node)
+            routing.AddDisjunction([ckpt_routing_idx], BIG_PENALTY)
+            routing.SetAllowedVehiclesForIndex([v], ckpt_routing_idx)
 
         # Search parameters
         search_params = pywrapcp.DefaultRoutingSearchParameters()
@@ -348,13 +378,15 @@ class VRPSolverV2:
         )
         search_params.time_limit.seconds = time_limit
 
-        # Solve
         assignment = routing.SolveWithParameters(search_params)
 
         if not assignment:
             raise Exception("OR-Tools could not find a solution")
 
-        # Extract solution and post-process to add checkpoint visits
+        # --- Extract solution ---
+        # Checkpoint copies are mapped back to the original checkpoint node ID.
+        # Actual route distances are recalculated from the original (non-expanded,
+        # non-penalised) distance matrix.
         routes = []
         total_distance_m = 0
         checkpoint_node_id = nodes[checkpoint_idx].id  # 1-indexed
@@ -362,59 +394,61 @@ class VRPSolverV2:
         for vehicle_id in range(num_vehicles):
             index = routing.Start(vehicle_id)
             route_nodes = []
-            general_load = 0
-            recycle_load = 0
+            general_load = 0.0
+            recycle_load = 0.0
 
             while not routing.IsEnd(index):
                 node_idx = manager.IndexToNode(index)
-                node = nodes[node_idx]
-
-                # Skip checkpoint if OR-Tools included it (we'll add it at the right position)
-                if node_idx != checkpoint_idx:
-                    route_nodes.append(node.id)  # 1-indexed
+                if node_idx < num_nodes:
+                    node = nodes[node_idx]
+                    route_nodes.append(node.id)
                     general_load += node.general_demand
                     recycle_load += node.recycle_demand
-
+                else:
+                    # Phantom checkpoint copy — treat as the real checkpoint
+                    route_nodes.append(checkpoint_node_id)
                 index = assignment.Value(routing.NextVar(index))
 
-            # Only process non-trivial routes (has collection nodes besides depot)
-            if len(route_nodes) > 1:
-                # POST-PROCESSING: Insert checkpoint before returning to depot
-                # Route structure: [depot, ...collections..., checkpoint, depot]
-                route_nodes.append(checkpoint_node_id)
-                route_nodes.append(1)  # End at depot
+            route_nodes.append(1)  # End at depot
 
-                # Calculate actual distance with checkpoint included
-                route_distance = 0.0
-                for i in range(len(route_nodes) - 1):
-                    from_idx = route_nodes[i] - 1  # Convert to 0-indexed
-                    to_idx = route_nodes[i + 1] - 1
-                    route_distance += distance_matrix[from_idx][to_idx]
+            # Only keep routes that have actual collection nodes (not just depot + checkpoint + depot)
+            collection_nodes_in_route = [
+                n for n in route_nodes[1:-1] if n != checkpoint_node_id
+            ]
+            if not collection_nodes_in_route:
+                continue
 
-                distance_km = route_distance / 1000.0
-                fuel_cost = distance_km * vehicle.fuel_cost_per_km
+            # Recalculate actual distance using original distance matrix (no penalties)
+            route_distance = 0.0
+            for i in range(len(route_nodes) - 1):
+                from_idx = route_nodes[i] - 1  # 1-indexed → 0-indexed
+                to_idx = route_nodes[i + 1] - 1
+                route_distance += distance_matrix[from_idx][to_idx]
 
-                route = Route(
-                    vehicle_id=vehicle_id + 1,
-                    vehicle_type=vehicle.type_id,
-                    nodes=route_nodes,
-                    distance_meters=route_distance,
-                    distance_km=distance_km,
-                    general_load=general_load,
-                    recycle_load=recycle_load,
-                    fixed_cost=vehicle.fixed_cost,
-                    fuel_cost=fuel_cost,
-                    total_cost=vehicle.fixed_cost + fuel_cost
-                )
-                routes.append(route)
-                total_distance_m += route_distance
+            distance_km = route_distance / 1000.0
+            fuel_cost = distance_km * vehicle.fuel_cost_per_km
+
+            route = Route(
+                vehicle_id=vehicle_id + 1,
+                vehicle_type=vehicle.type_id,
+                nodes=route_nodes,
+                distance_meters=route_distance,
+                distance_km=distance_km,
+                general_load=general_load,
+                recycle_load=recycle_load,
+                fixed_cost=vehicle.fixed_cost,
+                fuel_cost=fuel_cost,
+                total_cost=vehicle.fixed_cost + fuel_cost
+            )
+            routes.append(route)
+            total_distance_m += route_distance
 
         total_distance_km = total_distance_m / 1000.0
         total_fixed = sum(r.fixed_cost for r in routes)
         total_fuel = sum(r.fuel_cost for r in routes)
 
         return Solution(
-            status='OPTIMAL' if assignment else 'INFEASIBLE',
+            status='OPTIMAL',
             routes=routes,
             num_vehicles_used=len(routes),
             total_distance_meters=total_distance_m,
@@ -732,7 +766,7 @@ class VRPSolverV2:
 
 def main():
     """Main entry point."""
-    excel_file = 'D:/projects/VRPv2/data/distance_matrix_full_138_zones-edit4.xlsx'
+    excel_file = 'D:/projects/python/VRPv2/data/distance_matrix_full_138_zones-edit4.xlsx'
 
     solver = VRPSolverV2(excel_file)
     results = solver.solve_all(time_limit_per_sheet=60)
